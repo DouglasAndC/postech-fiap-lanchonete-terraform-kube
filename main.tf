@@ -2,124 +2,131 @@ provider "aws" {
   region = "us-east-1"
 }
 
-resource "aws_vpc" "postech_fiap_vpc" {
-  cidr_block = "10.0.0.0/16"
+module "vpc" {
+  source = "terraform-aws-modules/vpc/aws"
+
+  name = "vpc_postech_fiap"
+  cidr = "10.0.0.0/16"
+
+  azs             = ["us-east-1a", "us-east-1b"]
+  private_subnets = ["10.0.1.0/24", "10.0.2.0/24"]
+  public_subnets  = ["10.0.101.0/24", "10.0.102.0/24"]
+
+  enable_nat_gateway = true
+  enable_vpn_gateway = true
 
   tags = {
-    Name = "vpc_postech_fiap"
+    Terraform = "true"
   }
 }
 
-resource "aws_internet_gateway" "gw" {
-  vpc_id = aws_vpc.postech_fiap_vpc.id
-
-  tags = {
-    Name = "postech_fiap_vpc_internet_gw"
-  }
-}
-
-resource "aws_subnet" "postech_fiap_private_subnet1" {
-  vpc_id                  = aws_vpc.postech_fiap_vpc.id
-  cidr_block              = "10.0.1.0/24"
-  availability_zone       = "us-east-1a"
-  map_public_ip_on_launch = false
-
-  tags = {
-    Name = "postech_fiap_private_subnet1"
-  }
-}
-
-resource "aws_subnet" "postech_fiap_private_subnet2" {
-  vpc_id                  = aws_vpc.postech_fiap_vpc.id
-  cidr_block              = "10.0.2.0/24"
-  availability_zone       = "us-east-1b"
-  map_public_ip_on_launch = false
-
-  tags = {
-    Name = "postech_fiap_private_subnet2"
-  }
-}
-
-resource "aws_subnet" "postech_fiap_public_subnet1" {
-  vpc_id                  = aws_vpc.postech_fiap_vpc.id
-  cidr_block              = "10.0.3.0/24"
-  availability_zone       = "us-east-1a"
-
-  tags = {
-    Name = "postech_fiap_public_subnet1"
-  }
-}
-
-resource "aws_subnet" "postech_fiap_public_subnet2" {
-  vpc_id                  = aws_vpc.postech_fiap_vpc.id
-  cidr_block              = "10.0.4.0/24"
-  availability_zone       = "us-east-1b"
-
-  tags = {
-    Name = "postech_fiap_public_subnet2"
-  }
-}
-
-resource "aws_api_gateway_vpc_link" "postech_fiap_gateway" {
-  name        = "postech-fiap-alb"
-  description = "postech-fiap-alb"
-  target_arns = [aws_lb.postech_fiap_alb.arn]
-}
-
-resource "aws_lb" "postech_fiap_alb" {
-  name               = "postech-fiap-alb"
-  internal           = false
-  load_balancer_type = "application"
-  security_groups    = [aws_security_group.postech_fiap_alb_sg.id]
-  subnets            = [aws_subnet.postech_fiap_private_subnet1.id, aws_subnet.postech_fiap_private_subnet2.id]
-}
-
-resource "aws_security_group" "postech_fiap_alb_sg" {
-  name        = "alb-sg"
-  description = "Security Group for ALB"
-  vpc_id      = aws_vpc.postech_fiap_vpc.id
-
+resource "aws_security_group" "lb_security_group" {
+  name        = "lb_security_group_postech_fiap"
+  description = "LoadBalancer Security Group Postech Fiap"
+  vpc_id      = module.vpc.vpc_id
   ingress {
+    description = "Allow from anyone on port 80"
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
-
   egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
+    description = "Allow from anyone on port 80"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
   }
+}
+
+resource "aws_lb" "alb_eks" {
+  name               = "alb-eks-postech-fiap"
+  load_balancer_type = "application"
+  internal           = true
+  subnets            = module.vpc.private_subnets
+  security_groups    = [aws_security_group.lb_security_group.id]
+}
+
+resource "aws_lb_target_group" "alb_eks_tg" {
+  port        = 80
+  protocol    = "HTTP"
+  target_type = "ip"
+  vpc_id      = module.vpc.vpc_id
+}
+
+resource "aws_lb_listener" "eks_alb_listener" {
+  load_balancer_arn = aws_lb.alb_eks.arn
+  port              = "80"
+  protocol          = "HTTP"
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.alb_eks_tg.arn
+  }
+}
+
+resource "aws_apigatewayv2_vpc_link" "vpclink_apigw_to_alb" {
+  name               = "vpclink_apigw_to_alb_postech_fiap"
+  security_group_ids = []
+  subnet_ids         = module.vpc.private_subnets
+}
+
+resource "aws_apigatewayv2_api" "apigw_http_endpoint" {
+  name          = "lanchonete-pvt-endpoint"
+  protocol_type = "HTTP"
+}
+
+resource "aws_apigatewayv2_integration" "apigw_integration" {
+  api_id           = aws_apigatewayv2_api.apigw_http_endpoint.id
+  integration_type = "HTTP_PROXY"
+  integration_uri  = aws_lb_listener.eks_alb_listener.arn
+
+  integration_method     = "ANY"
+  connection_type        = "VPC_LINK"
+  connection_id          = aws_apigatewayv2_vpc_link.vpclink_apigw_to_alb.id
+  payload_format_version = "1.0"
+  depends_on = [aws_apigatewayv2_vpc_link.vpclink_apigw_to_alb,
+    aws_apigatewayv2_api.apigw_http_endpoint,
+  aws_lb_listener.eks_alb_listener]
+}
+
+resource "aws_apigatewayv2_route" "apigw_route" {
+  api_id     = aws_apigatewayv2_api.apigw_http_endpoint.id
+  route_key  = "ANY /lanchonete/{proxy+}"
+  target     = "integrations/${aws_apigatewayv2_integration.apigw_integration.id}"
+  depends_on = [aws_apigatewayv2_integration.apigw_integration]
+}
+
+resource "aws_apigatewayv2_stage" "apigw_stage" {
+  api_id      = aws_apigatewayv2_api.apigw_http_endpoint.id
+  name        = "$default"
+  auto_deploy = true
+  depends_on  = [aws_apigatewayv2_api.apigw_http_endpoint]
+}
+
+output "apigw_endpoint" {
+  value       = aws_apigatewayv2_api.apigw_http_endpoint.api_endpoint
+  description = "API Gateway Endpoint"
 }
 
 resource "aws_eks_cluster" "eks_cluster" {
   name     = "lanchonete-cluster"
   version  = "1.29"
-  role_arn = "arn:aws:iam::992382762661:role/LabRole"
+  role_arn = "arn:aws:iam::767398144542:role/LabRole"
   vpc_config {
-    subnet_ids         = [aws_subnet.postech_fiap_private_subnet1.id, aws_subnet.postech_fiap_private_subnet2.id]
-    security_group_ids = [aws_security_group.postech_fiap_eks_sg.id]
+    subnet_ids         = module.vpc.private_subnets
+    security_group_ids = [aws_security_group.lb_security_group.id]
   }
 }
 
-resource "aws_security_group" "postech_fiap_eks_sg" {
-  name        = "eks-sg"
-  description = "Security Group for EKS"
-  vpc_id      = aws_vpc.postech_fiap_vpc.id
-
-  ingress {
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
+resource "aws_eks_node_group" "eks_node_group_t3_medium" {
+  cluster_name    = aws_eks_cluster.eks_cluster.name
+  node_group_name = "eks_node_group_t3_medium"
+  node_role_arn   = "arn:aws:iam::767398144542:role/LabRole"
+  subnet_ids      = module.vpc.private_subnets
+  instance_types  = ["t3.medium"]
+  scaling_config {
+    desired_size = 2
+    max_size     = 3
+    min_size     = 1
   }
 }

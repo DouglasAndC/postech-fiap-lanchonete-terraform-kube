@@ -109,7 +109,7 @@ output "apigw_endpoint" {
 }
 
 resource "aws_eks_cluster" "eks_cluster" {
-  name     = "lanchonete-cluster"
+  name     = var.cluster_name
   version  = "1.29"
   role_arn = "arn:aws:iam::767398144542:role/LabRole"
   vpc_config {

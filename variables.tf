@@ -1,11 +1,9 @@
-#variable "aws_region" {
-#  description = "AWS region"
-#}
-#
-#variable "cluster_name" {
-#  description = "Name of the EKS cluster"
-#}
-#
-#variable "cluster_version" {
-#  description = "Version of the EKS cluster"
-#}
+variable "aws_region" {
+  description = "AWS region"
+  default = "us-east-1"
+}
+
+variable "cluster_name" {
+  description = "Name of the EKS cluster"
+  default = "lanchonete-cluster"
+}
